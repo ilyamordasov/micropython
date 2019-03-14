@@ -15,7 +15,11 @@ FROZEN_MPY_DIR = modules
 # include py core make definitions
 include $(TOP)/py/py.mk
 
+PORT ?= /dev/tty.SLAB_USBtoUART
+UNAME := $(shell uname)
+ifeq ($(UNAME), Linux)
 PORT ?= /dev/ttyUSB0
+endif
 BAUD ?= 460800
 FLASH_MODE ?= dio
 FLASH_FREQ ?= 40m
