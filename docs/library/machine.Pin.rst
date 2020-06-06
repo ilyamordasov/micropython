@@ -216,6 +216,7 @@ Methods
      - ``hard`` if true a hardware interrupt is used. This reduces the delay
        between the pin change and the handler being called. Hard interrupt
        handlers may not allocate memory; see :ref:`isr_rules`.
+       Not all ports support this argument.
 
    This method returns a callback object.
 
@@ -235,6 +236,7 @@ not all constants are available on all ports.
 
 .. data:: Pin.PULL_UP
           Pin.PULL_DOWN
+          Pin.PULL_HOLD
 
    Selects whether there is a pull up/down resistor.  Use the value
    ``None`` for no pull.

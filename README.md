@@ -1,10 +1,10 @@
-[![Build Status](https://travis-ci.org/ilyamordasov/micropython.png?branch=master)](https://travis-ci.org/ilyamordasov/micropython) [![Coverage Status](https://coveralls.io/repos/github/ilyamordasov/micropython/badge.svg?branch=master)](https://coveralls.io/github/ilyamordasov/micropython?branch=master)
+[![Build Status](https://travis-ci.com/micropython/micropython.png?branch=master)](https://travis-ci.com/micropython/micropython) [![Coverage Status](https://coveralls.io/repos/micropython/micropython/badge.png?branch=master)](https://coveralls.io/r/micropython/micropython?branch=master)
 
 The MicroPython project
 =======================
-<!--<p align="center">
+<p align="center">
   <img src="https://raw.githubusercontent.com/micropython/micropython/master/logo/upython-with-micro.jpg" alt="MicroPython Logo"/>
-</p>-->
+</p>
 
 This is the MicroPython project, which aims to put an implementation
 of Python 3.x on microcontrollers and small embedded systems.
@@ -64,6 +64,17 @@ You will also need bash, gcc, and Python 3.3+ available as the command `python3`
 (if your system only has Python 2.7 then invoke make with the additional option
 `PYTHON=python2`).
 
+The MicroPython cross-compiler, mpy-cross
+-----------------------------------------
+
+Most ports require the MicroPython cross-compiler to be built first.  This
+program, called mpy-cross, is used to pre-compile Python scripts to .mpy
+files which can then be included (frozen) into the firmware/executable for
+a port.  To build mpy-cross use:
+
+    $ cd mpy-cross
+    $ make
+
 The Unix version
 ----------------
 
@@ -75,8 +86,8 @@ Alternatively, fallback implementation based on setjmp/longjmp can be used.
 
 To build (see section below for required dependencies):
 
-    $ git submodule update --init
     $ cd ports/unix
+    $ make submodules
     $ make
 
 Then to give it a try:
@@ -88,7 +99,7 @@ Use `CTRL-D` (i.e. EOF) to exit the shell.
 Learn about command-line options (in particular, how to increase heap size
 which may be needed for larger applications):
 
-    $ ./micropython --help
+    $ ./micropython -h
 
 Run complete testsuite:
 
@@ -116,13 +127,14 @@ Debian/Ubuntu/Mint derivative Linux distros, install `build-essential`
 Other dependencies can be built together with MicroPython. This may
 be required to enable extra features or capabilities, and in recent
 versions of MicroPython, these may be enabled by default. To build
-these additional dependencies, first fetch git submodules for them:
+these additional dependencies, in the port directory you're
+interested in (e.g. `ports/unix/`) first execute:
 
-    $ git submodule update --init
+    $ make submodules
 
-Use the same command to get the latest versions of dependencies, as
-they are updated from time to time. After that, in the port directory
-(e.g. `ports/unix/`), execute:
+This will fetch all the relevant git submodules (sub repositories) that
+the port needs.  Use the same command to get the latest versions of
+submodules as they are updated from time to time. After that execute:
 
     $ make deplibs
 
@@ -132,11 +144,11 @@ options (like cross-compiling), the same set of options should be passed
 to `make deplibs`. To actually enable/disable use of dependencies, edit
 `ports/unix/mpconfigport.mk` file, which has inline descriptions of the options.
 For example, to build SSL module (required for `upip` tool described above,
-and so enabled by dfeault), `MICROPY_PY_USSL` should be set to 1.
+and so enabled by default), `MICROPY_PY_USSL` should be set to 1.
 
 For some ports, building required dependences is transparent, and happens
-automatically. They still need to be fetched with the git submodule command
-above.
+automatically.  But they still need to be fetched with the `make submodules`
+command.
 
 The STM32 version
 -----------------
@@ -148,8 +160,8 @@ https://launchpad.net/gcc-arm-embedded
 
 To build:
 
-    $ git submodule update --init
     $ cd ports/stm32
+    $ make submodules
     $ make
 
 You then need to get your board into DFU mode.  On the pyboard, connect the

@@ -4,6 +4,7 @@
  * The MIT License (MIT)
  *
  * Copyright (c) 2014 Damien P. George
+ * Copyright (c) 2015-2016 Paul Sokolovsky
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,7 +47,7 @@
 STATIC char heap[38 * 1024];
 
 STATIC void mp_reset(void) {
-    mp_stack_set_top((void*)0x40000000);
+    mp_stack_set_top((void *)0x40000000);
     mp_stack_set_limit(8192);
     mp_hal_init();
     gc_init(heap, heap + sizeof(heap));
@@ -77,9 +78,9 @@ STATIC void mp_reset(void) {
 
     #if MICROPY_MODULE_FROZEN
     pyexec_frozen_module("_boot.py");
-    pyexec_file("boot.py");
+    pyexec_file_if_exists("boot.py");
     if (pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL) {
-        pyexec_file("main.py");
+        pyexec_file_if_exists("main.py");
     }
     #endif
 }
@@ -157,7 +158,7 @@ void MP_FASTCODE(nlr_jump_fail)(void *val) {
     }
 }
 
-//void __assert(const char *file, int line, const char *func, const char *expr) {
+// void __assert(const char *file, int line, const char *func, const char *expr) {
 void __assert(const char *file, int line, const char *expr) {
     printf("Assertion '%s' failed, at file %s:%d\n", expr, file, line);
     for (;;) {

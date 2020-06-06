@@ -3,7 +3,7 @@
  *
  * The MIT License (MIT)
  *
- * Copyright (c) 2017-2018 Damien P. George
+ * Copyright (c) 2017-2019 Damien P. George
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,12 +33,13 @@
 #include "storage.h"
 #include "i2cslave.h"
 #include "mboot.h"
+#include "dfu.h"
 
 // Using polling is about 10% faster than not using it (and using IRQ instead)
 // This DFU code with polling runs in about 70% of the time of the ST bootloader
 #define USE_USB_POLLING (1)
 
-// Using cache probably won't make it faster because we run at 48MHz, and best
+// Using cache probably won't make it faster because we run at a low frequency, and best
 // to keep the MCU config as minimal as possible.
 #define USE_CACHE (0)
 
@@ -46,18 +47,25 @@
 #define IRQ_PRI_SYSTICK (NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 0, 0))
 #define IRQ_PRI_I2C (NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 1, 0))
 
-// Configure PLL to give a 48MHz CPU freq
+// Configure PLL to give the desired CPU freq
+#undef MICROPY_HW_FLASH_LATENCY
+#if defined(STM32H7)
+#define CORE_PLL_FREQ (96000000)
+#define MICROPY_HW_FLASH_LATENCY FLASH_LATENCY_2
+#else
 #define CORE_PLL_FREQ (48000000)
+#define MICROPY_HW_FLASH_LATENCY FLASH_LATENCY_1
+#endif
 #undef MICROPY_HW_CLK_PLLM
 #undef MICROPY_HW_CLK_PLLN
 #undef MICROPY_HW_CLK_PLLP
 #undef MICROPY_HW_CLK_PLLQ
-#undef MICROPY_HW_FLASH_LATENCY
+#undef MICROPY_HW_CLK_PLLR
 #define MICROPY_HW_CLK_PLLM (HSE_VALUE / 1000000)
 #define MICROPY_HW_CLK_PLLN (192)
-#define MICROPY_HW_CLK_PLLP (RCC_PLLP_DIV4)
+#define MICROPY_HW_CLK_PLLP (MICROPY_HW_CLK_PLLN / (CORE_PLL_FREQ / 1000000))
 #define MICROPY_HW_CLK_PLLQ (4)
-#define MICROPY_HW_FLASH_LATENCY FLASH_LATENCY_1
+#define MICROPY_HW_CLK_PLLR (2)
 
 // Work out which USB device to use for the USB DFU interface
 #if !defined(MICROPY_HW_USB_MAIN_DEV)
@@ -137,11 +145,25 @@ static void __fatal_error(const char *msg) {
 #define CONFIG_RCC_CR_2ND (RCC_CR_HSEON || RCC_CR_CSSON || RCC_CR_PLLON)
 #define CONFIG_RCC_PLLCFGR (0x24003010)
 
+#elif defined(STM32H7)
+
+#define CONFIG_RCC_CR_1ST (RCC_CR_HSION)
+#define CONFIG_RCC_CR_2ND (RCC_CR_PLL3ON | RCC_CR_PLL2ON | RCC_CR_PLL1ON | RCC_CR_CSSHSEON \
+    | RCC_CR_HSEON | RCC_CR_HSI48ON | RCC_CR_CSIKERON | RCC_CR_CSION)
+#define CONFIG_RCC_PLLCFGR (0x00000000)
+
 #else
 #error Unknown processor
 #endif
 
 void SystemInit(void) {
+    #if defined(STM32H7)
+    // Configure write-once power options, and wait for voltage levels to be ready
+    PWR->CR3 = PWR_CR3_LDOEN;
+    while (!(PWR->CSR1 & PWR_CSR1_ACTVOSRDY)) {
+    }
+    #endif
+
     // Set HSION bit
     RCC->CR |= CONFIG_RCC_CR_1ST;
 
@@ -154,11 +176,27 @@ void SystemInit(void) {
     // Reset PLLCFGR register
     RCC->PLLCFGR = CONFIG_RCC_PLLCFGR;
 
+    #if defined(STM32H7)
+    // Reset PLL and clock configuration registers
+    RCC->D1CFGR = 0x00000000;
+    RCC->D2CFGR = 0x00000000;
+    RCC->D3CFGR = 0x00000000;
+    RCC->PLLCKSELR = 0x00000000;
+    RCC->D1CCIPR = 0x00000000;
+    RCC->D2CCIP1R = 0x00000000;
+    RCC->D2CCIP2R = 0x00000000;
+    RCC->D3CCIPR = 0x00000000;
+    #endif
+
     // Reset HSEBYP bit
     RCC->CR &= (uint32_t)0xFFFBFFFF;
 
     // Disable all interrupts
+    #if defined(STM32F4) || defined(STM32F7)
     RCC->CIR = 0x00000000;
+    #elif defined(STM32H7)
+    RCC->CIER = 0x00000000;
+    #endif
 
     // Set location of vector table
     SCB->VTOR = FLASH_BASE;
@@ -172,6 +210,8 @@ void systick_init(void) {
     SysTick_Config(SystemCoreClock / 1000);
     NVIC_SetPriority(SysTick_IRQn, IRQ_PRI_SYSTICK);
 }
+
+#if defined(STM32F4) || defined(STM32F7)
 
 void SystemClock_Config(void) {
     // This function assumes that HSI is used as the system clock (see RCC->CFGR, SWS bits)
@@ -243,6 +283,87 @@ void SystemClock_Config(void) {
     #endif
 }
 
+#elif defined(STM32H7)
+
+void SystemClock_Config(void) {
+    // This function assumes that HSI is used as the system clock (see RCC->CFGR, SWS bits)
+
+    // Select VOS level as high voltage to give reliable operation
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+    while (__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY) == RESET) {
+    }
+
+    // Turn HSE on
+    __HAL_RCC_HSE_CONFIG(RCC_HSE_ON);
+    while (__HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY) == RESET) {
+    }
+
+    // Disable PLL1
+    __HAL_RCC_PLL_DISABLE();
+    while (__HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY) != RESET) {
+    }
+
+    // Configure PLL1 factors and source
+    RCC->PLLCKSELR =
+        MICROPY_HW_CLK_PLLM << RCC_PLLCKSELR_DIVM1_Pos
+        | 2 << RCC_PLLCKSELR_PLLSRC_Pos; // HSE selected as PLL source
+    RCC->PLL1DIVR =
+        (MICROPY_HW_CLK_PLLN - 1) << RCC_PLL1DIVR_N1_Pos
+        | (MICROPY_HW_CLK_PLLP - 1) << RCC_PLL1DIVR_P1_Pos // only even P allowed
+        | (MICROPY_HW_CLK_PLLQ - 1) << RCC_PLL1DIVR_Q1_Pos
+        | (MICROPY_HW_CLK_PLLR - 1) << RCC_PLL1DIVR_R1_Pos;
+
+    // Enable PLL1 outputs for SYSCLK and USB
+    RCC->PLLCFGR = RCC_PLLCFGR_DIVP1EN | RCC_PLLCFGR_DIVQ1EN;
+
+    // Select PLL1-Q for USB clock source
+    RCC->D2CCIP2R |= 1 << RCC_D2CCIP2R_USBSEL_Pos;
+
+    // Enable PLL1
+    __HAL_RCC_PLL_ENABLE();
+    while(__HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY) == RESET) {
+    }
+
+    // Increase latency before changing SYSCLK
+    if (MICROPY_HW_FLASH_LATENCY > (FLASH->ACR & FLASH_ACR_LATENCY)) {
+        __HAL_FLASH_SET_LATENCY(MICROPY_HW_FLASH_LATENCY);
+    }
+
+    // Configure AHB divider
+    RCC->D1CFGR =
+        0 << RCC_D1CFGR_D1CPRE_Pos // SYSCLK prescaler of 1
+        | 8 << RCC_D1CFGR_HPRE_Pos // AHB prescaler of 2
+        ;
+
+    // Configure SYSCLK source from PLL
+    __HAL_RCC_SYSCLK_CONFIG(RCC_SYSCLKSOURCE_PLLCLK);
+    while (__HAL_RCC_GET_SYSCLK_SOURCE() != RCC_CFGR_SWS_PLL1) {
+    }
+
+    // Decrease latency after changing clock
+    if (MICROPY_HW_FLASH_LATENCY < (FLASH->ACR & FLASH_ACR_LATENCY)) {
+        __HAL_FLASH_SET_LATENCY(MICROPY_HW_FLASH_LATENCY);
+    }
+
+    // Set APB clock dividers
+    RCC->D1CFGR |=
+        4 << RCC_D1CFGR_D1PPRE_Pos // APB3 prescaler of 2
+        ;
+    RCC->D2CFGR =
+        4 << RCC_D2CFGR_D2PPRE2_Pos // APB2 prescaler of 2
+        | 4 << RCC_D2CFGR_D2PPRE1_Pos // APB1 prescaler of 2
+        ;
+    RCC->D3CFGR =
+        4 << RCC_D3CFGR_D3PPRE_Pos // APB4 prescaler of 2
+        ;
+
+    // Update clock value and reconfigure systick now that the frequency changed
+    SystemCoreClock = CORE_PLL_FREQ;
+    systick_init();
+}
+
+#endif
+
 // Needed by HAL_PCD_IRQHandler
 uint32_t HAL_RCC_GetHCLKFreq(void) {
     return SystemCoreClock;
@@ -251,13 +372,21 @@ uint32_t HAL_RCC_GetHCLKFreq(void) {
 /******************************************************************************/
 // GPIO
 
+#if defined(STM32F4) || defined(STM32F7)
+#define AHBxENR AHB1ENR
+#define AHBxENR_GPIOAEN_Pos RCC_AHB1ENR_GPIOAEN_Pos
+#elif defined(STM32H7)
+#define AHBxENR AHB4ENR
+#define AHBxENR_GPIOAEN_Pos RCC_AHB4ENR_GPIOAEN_Pos
+#endif
+
 void mp_hal_pin_config(mp_hal_pin_obj_t port_pin, uint32_t mode, uint32_t pull, uint32_t alt) {
     GPIO_TypeDef *gpio = (GPIO_TypeDef*)(port_pin & ~0xf);
 
     // Enable the GPIO peripheral clock
-    uint32_t en_bit = RCC_AHB1ENR_GPIOAEN_Pos + ((uintptr_t)gpio - GPIOA_BASE) / (GPIOB_BASE - GPIOA_BASE);
-    RCC->AHB1ENR |= 1 << en_bit;
-    volatile uint32_t tmp = RCC->AHB1ENR; // Delay after enabling clock
+    uint32_t gpio_idx = ((uintptr_t)gpio - GPIOA_BASE) / (GPIOB_BASE - GPIOA_BASE);
+    RCC->AHBxENR |= 1 << (AHBxENR_GPIOAEN_Pos + gpio_idx);
+    volatile uint32_t tmp = RCC->AHBxENR; // Delay after enabling clock
     (void)tmp;
 
     // Configure the pin
@@ -280,24 +409,39 @@ void mp_hal_pin_config_speed(uint32_t port_pin, uint32_t speed) {
 
 #define LED0 MICROPY_HW_LED1
 #define LED1 MICROPY_HW_LED2
+#ifdef MICROPY_HW_LED3
 #define LED2 MICROPY_HW_LED3
+#endif
 #ifdef MICROPY_HW_LED4
 #define LED3 MICROPY_HW_LED4
 #endif
 
-void led_init(void) {
+// For flashing states: bit 0 is "active", bit 1 is "inactive", bits 2-6 are flash rate.
+typedef enum {
+    LED0_STATE_OFF = 0,
+    LED0_STATE_ON = 1,
+    LED0_STATE_SLOW_FLASH = (20 << 2) | 1,
+    LED0_STATE_FAST_FLASH = (2 << 2) | 1,
+    LED0_STATE_SLOW_INVERTED_FLASH = (20 << 2) | 2,
+} led0_state_t;
+
+static led0_state_t led0_cur_state = LED0_STATE_OFF;
+static uint32_t led0_ms_interval = 0;
+static int led0_toggle_count = 0;
+
+MP_WEAK void led_init(void) {
     mp_hal_pin_output(LED0);
     mp_hal_pin_output(LED1);
+    #ifdef LED2
     mp_hal_pin_output(LED2);
+    #endif
     #ifdef LED3
     mp_hal_pin_output(LED3);
     #endif
+    led0_cur_state = LED0_STATE_OFF;
 }
 
-void led_state(int led, int val) {
-    if (led == 1) {
-        led = LED0;
-    }
+MP_WEAK void led_state(uint32_t led, int val) {
     if (val) {
         MICROPY_HW_LED_ON(led);
     } else {
@@ -308,10 +452,30 @@ void led_state(int led, int val) {
 void led_state_all(unsigned int mask) {
     led_state(LED0, mask & 1);
     led_state(LED1, mask & 2);
+    #ifdef LED2
     led_state(LED2, mask & 4);
+    #endif
     #ifdef LED3
     led_state(LED3, mask & 8);
     #endif
+}
+
+void led0_state(led0_state_t state) {
+    led0_cur_state = state;
+    if (state == LED0_STATE_OFF || state == LED0_STATE_ON) {
+        led_state(LED0, state);
+    }
+}
+
+void led0_update() {
+    if (led0_cur_state != LED0_STATE_OFF && systick_ms - led0_ms_interval > 50) {
+        uint8_t rate = (led0_cur_state >> 2) & 0x1f;
+        led0_ms_interval += 50;
+        if (++led0_toggle_count >= rate) {
+            led0_toggle_count = 0;
+        }
+        led_state(LED0, (led0_cur_state & (led0_toggle_count == 0 ? 1 : 2)));
+    }
 }
 
 /******************************************************************************/
@@ -381,7 +545,22 @@ static const flash_layout_t flash_layout[] = {
     { 0x08040000, 0x40000, 7 },
 };
 
+#elif defined(STM32H743xx)
+
+#define FLASH_LAYOUT_STR "@Internal Flash  /0x08000000/16*128Kg" MBOOT_SPIFLASH_LAYOUT MBOOT_SPIFLASH2_LAYOUT
+
+static const flash_layout_t flash_layout[] = {
+    { 0x08000000, 0x20000, 16 },
+};
+
 #endif
+
+static inline bool flash_is_valid_addr(uint32_t addr) {
+    uint8_t last = MP_ARRAY_SIZE(flash_layout) - 1;
+    uint32_t end_of_flash = flash_layout[last].base_address +
+        flash_layout[last].sector_count * flash_layout[last].sector_size;
+    return flash_layout[0].base_address <= addr && addr < end_of_flash;
+}
 
 static uint32_t flash_get_sector_index(uint32_t addr, uint32_t *sector_size) {
     if (addr >= flash_layout[0].base_address) {
@@ -401,6 +580,27 @@ static uint32_t flash_get_sector_index(uint32_t addr, uint32_t *sector_size) {
     return 0;
 }
 
+#if defined(STM32H7)
+// get the bank of a given flash address
+static uint32_t get_bank(uint32_t addr) {
+    if (READ_BIT(FLASH->OPTCR, FLASH_OPTCR_SWAP_BANK) == 0) {
+        // no bank swap
+        if (addr < (FLASH_BASE + FLASH_BANK_SIZE)) {
+            return FLASH_BANK_1;
+        } else {
+            return FLASH_BANK_2;
+        }
+    } else {
+        // bank swap
+        if (addr < (FLASH_BASE + FLASH_BANK_SIZE)) {
+            return FLASH_BANK_2;
+        } else {
+            return FLASH_BANK_1;
+        }
+    }
+}
+#endif
+
 static int flash_mass_erase(void) {
     // TODO
     return -1;
@@ -411,6 +611,8 @@ static int flash_page_erase(uint32_t addr, uint32_t *next_addr) {
     uint32_t sector = flash_get_sector_index(addr, &sector_size);
     if (sector == 0) {
         // Don't allow to erase the sector with this bootloader in it
+        dfu_context.status = DFU_STATUS_ERROR_ADDRESS;
+        dfu_context.error = MBOOT_ERROR_STR_OVERWRITE_BOOTLOADER_IDX;
         return -1;
     }
 
@@ -419,13 +621,20 @@ static int flash_page_erase(uint32_t addr, uint32_t *next_addr) {
     HAL_FLASH_Unlock();
 
     // Clear pending flags (if any)
+    #if defined(STM32H7)
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS_BANK1 | FLASH_FLAG_ALL_ERRORS_BANK2);
+    #else
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
                            FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+    #endif
 
     // erase the sector(s)
     FLASH_EraseInitTypeDef EraseInitStruct;
     EraseInitStruct.TypeErase = TYPEERASE_SECTORS;
     EraseInitStruct.VoltageRange = VOLTAGE_RANGE_3; // voltage range needs to be 2.7V to 3.6V
+    #if defined(STM32H7)
+    EraseInitStruct.Banks = get_bank(addr);
+    #endif
     EraseInitStruct.Sector = sector;
     EraseInitStruct.NbSectors = 1;
 
@@ -448,12 +657,28 @@ static int flash_page_erase(uint32_t addr, uint32_t *next_addr) {
 static int flash_write(uint32_t addr, const uint8_t *src8, size_t len) {
     if (addr >= flash_layout[0].base_address && addr < flash_layout[0].base_address + flash_layout[0].sector_size) {
         // Don't allow to write the sector with this bootloader in it
+        dfu_context.status = DFU_STATUS_ERROR_ADDRESS;
+        dfu_context.error = MBOOT_ERROR_STR_OVERWRITE_BOOTLOADER_IDX;
         return -1;
     }
 
     const uint32_t *src = (const uint32_t*)src8;
     size_t num_word32 = (len + 3) / 4;
     HAL_FLASH_Unlock();
+
+    #if defined(STM32H7)
+
+    // program the flash 256 bits at a time
+    for (int i = 0; i < num_word32 / 8; ++i) {
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD, addr, (uint64_t)(uint32_t)src) != HAL_OK) {
+            return - 1;
+        }
+        addr += 32;
+        src += 8;
+    }
+
+    #else
+
     // program the flash word by word
     for (size_t i = 0; i < num_word32; i++) {
         if (HAL_FLASH_Program(TYPEPROGRAM_WORD, addr, *src) != HAL_OK) {
@@ -462,6 +687,8 @@ static int flash_write(uint32_t addr, const uint8_t *src8, size_t len) {
         addr += 4;
         src += 1;
     }
+
+    #endif
 
     // TODO verify data
 
@@ -490,62 +717,72 @@ static int spiflash_page_erase(mp_spiflash_t *spif, uint32_t addr, uint32_t n_bl
 #endif
 
 int do_page_erase(uint32_t addr, uint32_t *next_addr) {
-    led_state(LED0, 1);
+    int ret = -1;
+    led0_state(LED0_STATE_ON);
 
     #if defined(MBOOT_SPIFLASH_ADDR)
     if (MBOOT_SPIFLASH_ADDR <= addr && addr < MBOOT_SPIFLASH_ADDR + MBOOT_SPIFLASH_BYTE_SIZE) {
         *next_addr = addr + MBOOT_SPIFLASH_ERASE_BLOCKS_PER_PAGE * MP_SPIFLASH_ERASE_BLOCK_SIZE;
-        return spiflash_page_erase(MBOOT_SPIFLASH_SPIFLASH,
+        ret = spiflash_page_erase(MBOOT_SPIFLASH_SPIFLASH,
             addr - MBOOT_SPIFLASH_ADDR, MBOOT_SPIFLASH_ERASE_BLOCKS_PER_PAGE);
-    }
+    } else
     #endif
-
     #if defined(MBOOT_SPIFLASH2_ADDR)
     if (MBOOT_SPIFLASH2_ADDR <= addr && addr < MBOOT_SPIFLASH2_ADDR + MBOOT_SPIFLASH2_BYTE_SIZE) {
         *next_addr = addr + MBOOT_SPIFLASH2_ERASE_BLOCKS_PER_PAGE * MP_SPIFLASH_ERASE_BLOCK_SIZE;
-        return spiflash_page_erase(MBOOT_SPIFLASH2_SPIFLASH,
+        ret = spiflash_page_erase(MBOOT_SPIFLASH2_SPIFLASH,
             addr - MBOOT_SPIFLASH2_ADDR, MBOOT_SPIFLASH2_ERASE_BLOCKS_PER_PAGE);
-    }
+    } else
     #endif
+    {
+        ret = flash_page_erase(addr, next_addr);
+    }
 
-    return flash_page_erase(addr, next_addr);
+    led0_state((ret == 0) ? LED0_STATE_SLOW_FLASH : LED0_STATE_SLOW_INVERTED_FLASH);
+    return ret;
 }
 
 void do_read(uint32_t addr, int len, uint8_t *buf) {
+    led0_state(LED0_STATE_FAST_FLASH);
     #if defined(MBOOT_SPIFLASH_ADDR)
     if (MBOOT_SPIFLASH_ADDR <= addr && addr < MBOOT_SPIFLASH_ADDR + MBOOT_SPIFLASH_BYTE_SIZE) {
         mp_spiflash_read(MBOOT_SPIFLASH_SPIFLASH, addr - MBOOT_SPIFLASH_ADDR, len, buf);
-        return;
-    }
+    } else
     #endif
     #if defined(MBOOT_SPIFLASH2_ADDR)
     if (MBOOT_SPIFLASH2_ADDR <= addr && addr < MBOOT_SPIFLASH2_ADDR + MBOOT_SPIFLASH2_BYTE_SIZE) {
         mp_spiflash_read(MBOOT_SPIFLASH2_SPIFLASH, addr - MBOOT_SPIFLASH2_ADDR, len, buf);
-        return;
-    }
+    } else
     #endif
-
-    // Other addresses, just read directly from memory
-    memcpy(buf, (void*)addr, len);
+    {
+        // Other addresses, just read directly from memory
+        memcpy(buf, (void*)addr, len);
+    }
+    led0_state(LED0_STATE_SLOW_FLASH);
 }
 
 int do_write(uint32_t addr, const uint8_t *src8, size_t len) {
-    static uint32_t led_tog = 0;
-    led_state(LED0, (led_tog++) & 4);
-
+    int ret = -1;
+    led0_state(LED0_STATE_FAST_FLASH);
     #if defined(MBOOT_SPIFLASH_ADDR)
     if (MBOOT_SPIFLASH_ADDR <= addr && addr < MBOOT_SPIFLASH_ADDR + MBOOT_SPIFLASH_BYTE_SIZE) {
-        return mp_spiflash_write(MBOOT_SPIFLASH_SPIFLASH, addr - MBOOT_SPIFLASH_ADDR, len, src8);
-    }
+        ret = mp_spiflash_write(MBOOT_SPIFLASH_SPIFLASH, addr - MBOOT_SPIFLASH_ADDR, len, src8);
+    } else
     #endif
-
     #if defined(MBOOT_SPIFLASH2_ADDR)
     if (MBOOT_SPIFLASH2_ADDR <= addr && addr < MBOOT_SPIFLASH2_ADDR + MBOOT_SPIFLASH2_BYTE_SIZE) {
-        return mp_spiflash_write(MBOOT_SPIFLASH2_SPIFLASH, addr - MBOOT_SPIFLASH2_ADDR, len, src8);
-    }
+        ret = mp_spiflash_write(MBOOT_SPIFLASH2_SPIFLASH, addr - MBOOT_SPIFLASH2_ADDR, len, src8);
+    } else
     #endif
+    if (flash_is_valid_addr(addr)) {
+        ret = flash_write(addr, src8, len);
+    } else {
+        dfu_context.status = DFU_STATUS_ERROR_ADDRESS;
+        dfu_context.error = MBOOT_ERROR_STR_INVALID_ADDRESS_IDX;
+    }
 
-    return flash_write(addr, src8, len);
+    led0_state((ret == 0) ? LED0_STATE_SLOW_FLASH : LED0_STATE_SLOW_INVERTED_FLASH);
+    return ret;
 }
 
 /******************************************************************************/
@@ -719,113 +956,82 @@ uint8_t i2c_slave_process_tx_byte(void) {
 /******************************************************************************/
 // DFU
 
-#define DFU_XFER_SIZE (2048)
-
-enum {
-    DFU_DNLOAD = 1,
-    DFU_UPLOAD = 2,
-    DFU_GETSTATUS = 3,
-    DFU_CLRSTATUS = 4,
-    DFU_ABORT = 6,
-};
-
-enum {
-    DFU_STATUS_IDLE = 2,
-    DFU_STATUS_BUSY = 4,
-    DFU_STATUS_DNLOAD_IDLE = 5,
-    DFU_STATUS_MANIFEST = 7,
-    DFU_STATUS_UPLOAD_IDLE = 9,
-    DFU_STATUS_ERROR = 0xa,
-};
-
-enum {
-    DFU_CMD_NONE = 0,
-    DFU_CMD_EXIT = 1,
-    DFU_CMD_UPLOAD = 7,
-    DFU_CMD_DNLOAD = 8,
-};
-
-typedef struct _dfu_state_t {
-    int status;
-    int cmd;
-    uint16_t wBlockNum;
-    uint16_t wLength;
-    uint32_t addr;
-    uint8_t buf[DFU_XFER_SIZE] __attribute__((aligned(4)));
-} dfu_state_t;
-
-static dfu_state_t dfu_state SECTION_NOZERO_BSS;
-
 static void dfu_init(void) {
-    dfu_state.status = DFU_STATUS_IDLE;
-    dfu_state.cmd = DFU_CMD_NONE;
-    dfu_state.addr = 0x08000000;
+    dfu_context.state = DFU_STATE_IDLE;
+    dfu_context.cmd = DFU_CMD_NONE;
+    dfu_context.status = DFU_STATUS_OK;
+    dfu_context.error = 0;
+    dfu_context.addr = 0x08000000;
 }
 
 static int dfu_process_dnload(void) {
     int ret = -1;
-    if (dfu_state.wBlockNum == 0) {
+    if (dfu_context.wBlockNum == 0) {
         // download control commands
-        if (dfu_state.wLength >= 1 && dfu_state.buf[0] == 0x41) {
-            if (dfu_state.wLength == 1) {
+        if (dfu_context.wLength >= 1 && dfu_context.buf[0] == 0x41) {
+            if (dfu_context.wLength == 1) {
                 // mass erase
                 ret = do_mass_erase();
-            } else if (dfu_state.wLength == 5) {
+            } else if (dfu_context.wLength == 5) {
                 // erase page
                 uint32_t next_addr;
-                ret = do_page_erase(get_le32(&dfu_state.buf[1]), &next_addr);
+                ret = do_page_erase(get_le32(&dfu_context.buf[1]), &next_addr);
             }
-        } else if (dfu_state.wLength >= 1 && dfu_state.buf[0] == 0x21) {
-            if (dfu_state.wLength == 5) {
+        } else if (dfu_context.wLength >= 1 && dfu_context.buf[0] == 0x21) {
+            if (dfu_context.wLength == 5) {
                 // set address
-                dfu_state.addr = get_le32(&dfu_state.buf[1]);
+                dfu_context.addr = get_le32(&dfu_context.buf[1]);
                 ret = 0;
             }
         }
-    } else if (dfu_state.wBlockNum > 1) {
+    } else if (dfu_context.wBlockNum > 1) {
         // write data to memory
-        uint32_t addr = (dfu_state.wBlockNum - 2) * DFU_XFER_SIZE + dfu_state.addr;
-        ret = do_write(addr, dfu_state.buf, dfu_state.wLength);
+        uint32_t addr = (dfu_context.wBlockNum - 2) * DFU_XFER_SIZE + dfu_context.addr;
+        ret = do_write(addr, dfu_context.buf, dfu_context.wLength);
     }
     if (ret == 0) {
-        return DFU_STATUS_DNLOAD_IDLE;
+        return DFU_STATE_DNLOAD_IDLE;
     } else {
-        return DFU_STATUS_ERROR;
+        return DFU_STATE_ERROR;
     }
 }
 
 static void dfu_handle_rx(int cmd, int arg, int len, const void *buf) {
     if (cmd == DFU_CLRSTATUS) {
         // clear status
-        dfu_state.status = DFU_STATUS_IDLE;
-        dfu_state.cmd = DFU_CMD_NONE;
+        dfu_context.state = DFU_STATE_IDLE;
+        dfu_context.cmd = DFU_CMD_NONE;
+        dfu_context.status = DFU_STATUS_OK;
+        dfu_context.error = 0;
     } else if (cmd == DFU_ABORT) {
         // clear status
-        dfu_state.status = DFU_STATUS_IDLE;
-        dfu_state.cmd = DFU_CMD_NONE;
+        dfu_context.state = DFU_STATE_IDLE;
+        dfu_context.cmd = DFU_CMD_NONE;
+        dfu_context.status = DFU_STATUS_OK;
+        dfu_context.error = 0;
     } else if (cmd == DFU_DNLOAD) {
         if (len == 0) {
             // exit DFU
-            dfu_state.cmd = DFU_CMD_EXIT;
+            dfu_context.cmd = DFU_CMD_EXIT;
         } else {
             // download
-            dfu_state.cmd = DFU_CMD_DNLOAD;
-            dfu_state.wBlockNum = arg;
-            dfu_state.wLength = len;
-            memcpy(dfu_state.buf, buf, len);
+            dfu_context.cmd = DFU_CMD_DNLOAD;
+            dfu_context.wBlockNum = arg;
+            dfu_context.wLength = len;
+            memcpy(dfu_context.buf, buf, len);
         }
     }
 }
 
 static void dfu_process(void) {
-    if (dfu_state.status == DFU_STATUS_MANIFEST) {
+    if (dfu_context.state == DFU_STATE_MANIFEST) {
         do_reset();
     }
 
-    if (dfu_state.status == DFU_STATUS_BUSY) {
-        if (dfu_state.cmd == DFU_CMD_DNLOAD) {
-            dfu_state.cmd = DFU_CMD_NONE;
-            dfu_state.status = dfu_process_dnload();
+    if (dfu_context.state == DFU_STATE_BUSY) {
+        if (dfu_context.cmd == DFU_CMD_DNLOAD) {
+            dfu_context.cmd = DFU_CMD_NONE;
+            dfu_context.state = dfu_process_dnload();
         }
     }
 }
@@ -833,32 +1039,34 @@ static void dfu_process(void) {
 static int dfu_handle_tx(int cmd, int arg, int len, uint8_t *buf, int max_len) {
     if (cmd == DFU_UPLOAD) {
         if (arg >= 2) {
-            dfu_state.cmd = DFU_CMD_UPLOAD;
-            uint32_t addr = (arg - 2) * max_len + dfu_state.addr;
+            dfu_context.cmd = DFU_CMD_UPLOAD;
+            uint32_t addr = (arg - 2) * max_len + dfu_context.addr;
             do_read(addr, len, buf);
             return len;
         }
     } else if (cmd == DFU_GETSTATUS && len == 6) {
         // execute command and get status
-        switch (dfu_state.cmd) {
+        switch (dfu_context.cmd) {
             case DFU_CMD_NONE:
                 break;
             case DFU_CMD_EXIT:
-                dfu_state.status = DFU_STATUS_MANIFEST;
+                dfu_context.state = DFU_STATE_MANIFEST;
                 break;
             case DFU_CMD_UPLOAD:
-                dfu_state.status = DFU_STATUS_UPLOAD_IDLE;
+                dfu_context.state = DFU_STATE_UPLOAD_IDLE;
                 break;
             case DFU_CMD_DNLOAD:
-                dfu_state.status = DFU_STATUS_BUSY;
+                dfu_context.state = DFU_STATE_BUSY;
                 break;
+            default:
+                dfu_context.state = DFU_STATE_BUSY;
         }
-        buf[0] = 0;
-        buf[1] = dfu_state.cmd; // TODO is this correct?
-        buf[2] = 0;
-        buf[3] = 0;
-        buf[4] = dfu_state.status;
-        buf[5] = 0;
+        buf[0] = dfu_context.status; // bStatus
+        buf[1] = 0; // bwPollTimeout (ms)
+        buf[2] = 0; // bwPollTimeout (ms)
+        buf[3] = 0; // bwPollTimeout (ms)
+        buf[4] = dfu_context.state; // bState
+        buf[5] = dfu_context.error; // iString
         return 6;
     }
     return -1;
@@ -888,16 +1096,46 @@ typedef struct _pyb_usbdd_obj_t {
     __ALIGN_BEGIN uint8_t usbd_str_desc[USBD_MAX_STR_DESC_SIZ] __ALIGN_END;
 } pyb_usbdd_obj_t;
 
-#define USBD_LANGID_STRING (0x409)
+#ifndef MBOOT_USBD_LANGID_STRING
+#define MBOOT_USBD_LANGID_STRING (0x409)
+#endif
+
+#ifndef MBOOT_USBD_MANUFACTURER_STRING
+#define MBOOT_USBD_MANUFACTURER_STRING      "MicroPython"
+#endif
+
+#ifndef MBOOT_USBD_PRODUCT_STRING
+#define MBOOT_USBD_PRODUCT_STRING        "Pyboard DFU"
+#endif
+
+#ifndef MBOOT_USB_VID
+#define MBOOT_USB_VID BOOTLOADER_DFU_USB_VID
+#endif
+
+#ifndef MBOOT_USB_PID
+#define MBOOT_USB_PID BOOTLOADER_DFU_USB_PID
+#endif
+
+static const uint8_t usbd_fifo_size[] = {
+    32, 8, 16, 8, 16, 0, 0, // FS: RX, EP0(in), 5x IN endpoints
+    #if MICROPY_HW_USB_HS
+    116, 8, 64, 4, 64, 0, 0, 0, 0, 0, // HS: RX, EP0(in), 8x IN endpoints
+    #endif
+};
 
 __ALIGN_BEGIN static const uint8_t USBD_LangIDDesc[USB_LEN_LANGID_STR_DESC] __ALIGN_END = {
     USB_LEN_LANGID_STR_DESC,
     USB_DESC_TYPE_STRING,
-    LOBYTE(USBD_LANGID_STRING),
-    HIBYTE(USBD_LANGID_STRING),
+    LOBYTE(MBOOT_USBD_LANGID_STRING),
+    HIBYTE(MBOOT_USBD_LANGID_STRING),
 };
 
-static const uint8_t dev_descr[0x12] = "\x12\x01\x00\x01\x00\x00\x00\x40\x83\x04\x11\xdf\x00\x22\x01\x02\x03\x01";
+static const uint8_t dev_descr[0x12] = {
+    0x12, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x40,
+    LOBYTE(MBOOT_USB_VID), HIBYTE(MBOOT_USB_VID),
+    LOBYTE(MBOOT_USB_PID), HIBYTE(MBOOT_USB_PID),
+    0x00, 0x22, 0x01, 0x02, 0x03, 0x01
+};
 
 // This may be modified by USBD_GetDescriptor
 static uint8_t cfg_descr[9 + 9 + 9] =
@@ -934,11 +1172,11 @@ static uint8_t *pyb_usbdd_StrDescriptor(USBD_HandleTypeDef *pdev, uint8_t idx, u
             return (uint8_t*)USBD_LangIDDesc; // the data should only be read from this buf
 
         case USBD_IDX_MFC_STR:
-            USBD_GetString((uint8_t*)"USBDevice Manuf", str_desc, length);
+            USBD_GetString((uint8_t*)MBOOT_USBD_MANUFACTURER_STRING, str_desc, length);
             return str_desc;
 
         case USBD_IDX_PRODUCT_STR:
-            USBD_GetString((uint8_t*)"USBDevice Product", str_desc, length);
+            USBD_GetString((uint8_t*)MBOOT_USBD_PRODUCT_STRING, str_desc, length);
             return str_desc;
 
         case USBD_IDX_SERIAL_STR: {
@@ -970,6 +1208,14 @@ static uint8_t *pyb_usbdd_StrDescriptor(USBD_HandleTypeDef *pdev, uint8_t idx, u
 
         case USBD_IDX_CONFIG_STR:
             USBD_GetString((uint8_t*)FLASH_LAYOUT_STR, str_desc, length);
+            return str_desc;
+
+        case MBOOT_ERROR_STR_OVERWRITE_BOOTLOADER_IDX:
+            USBD_GetString((uint8_t*)MBOOT_ERROR_STR_OVERWRITE_BOOTLOADER, str_desc, length);
+            return str_desc;
+
+        case MBOOT_ERROR_STR_INVALID_ADDRESS_IDX:
+            USBD_GetString((uint8_t*)MBOOT_ERROR_STR_INVALID_ADDRESS, str_desc, length);
             return str_desc;
 
         default:
@@ -1107,7 +1353,12 @@ static void pyb_usbdd_init(pyb_usbdd_obj_t *self, int phy_id) {
 
 static void pyb_usbdd_start(pyb_usbdd_obj_t *self) {
     if (!self->started) {
-        USBD_LL_Init(&self->hUSBDDevice, 0);
+        #if defined(STM32H7)
+        PWR->CR3 |= PWR_CR3_USB33DEN;
+        while (!(PWR->CR3 & PWR_CR3_USB33RDY)) {
+        }
+        #endif
+        USBD_LL_Init(&self->hUSBDDevice, 0, usbd_fifo_size);
         USBD_LL_Start(&self->hUSBDDevice);
         self->started = true;
     }
@@ -1130,10 +1381,14 @@ static int pyb_usbdd_shutdown(void) {
 
 #define RESET_MODE_NUM_STATES (4)
 #define RESET_MODE_TIMEOUT_CYCLES (8)
+#ifdef LED2
 #ifdef LED3
 #define RESET_MODE_LED_STATES 0x8421
 #else
 #define RESET_MODE_LED_STATES 0x7421
+#endif
+#else
+#define RESET_MODE_LED_STATES 0x3210
 #endif
 
 static int get_reset_mode(void) {
@@ -1226,8 +1481,8 @@ void stm32_main(int initial_r0) {
         goto enter_bootloader;
     }
 
-    // MCU starts up with 16MHz HSI
-    SystemCoreClock = 16000000;
+    // MCU starts up with HSI
+    SystemCoreClock = HSI_VALUE;
 
     int reset_mode = get_reset_mode();
     uint32_t msp = *(volatile uint32_t*)APPLICATION_ADDR;
@@ -1296,10 +1551,10 @@ enter_bootloader:
     #endif
 
     led_state_all(0);
+    led0_state(LED0_STATE_SLOW_FLASH);
 
-    #if USE_USB_POLLING
-    uint32_t ss = systick_ms;
-    int ss2 = -1;
+    #if MBOOT_USB_RESET_ON_DISCONNECT
+    bool has_connected = false;
     #endif
     for (;;) {
         #if USE_USB_POLLING
@@ -1316,23 +1571,17 @@ enter_bootloader:
         if (!pyb_usbdd.tx_pending) {
             dfu_process();
         }
+        #else // !USE_USB_POLLING
+        __WFI();
         #endif
 
-        #if USE_USB_POLLING
-        //__WFI(); // slows it down way too much; might work with 10x faster systick
-        if (systick_ms - ss > 50) {
-            ss += 50;
-            ss2 = (ss2 + 1) % 20;
-            switch (ss2) {
-                case 0: led_state(LED0, 1); break;
-                case 1: led_state(LED0, 0); break;
-            }
+        #if MBOOT_USB_RESET_ON_DISCONNECT
+        if (pyb_usbdd.hUSBDDevice.dev_state == USBD_STATE_CONFIGURED) {
+            has_connected = true;
         }
-        #else
-        led_state(LED0, 1);
-        mp_hal_delay_ms(50);
-        led_state(LED0, 0);
-        mp_hal_delay_ms(950);
+        if (has_connected && pyb_usbdd.hUSBDDevice.dev_state == USBD_STATE_SUSPENDED) {
+            do_reset();
+        }
         #endif
     }
 }
@@ -1374,6 +1623,10 @@ void SysTick_Handler(void) {
     // the COUNTFLAG bit, which makes the logic in mp_hal_ticks_us
     // work properly.
     SysTick->CTRL;
+
+    // Update the LED0 state from here to ensure it's consistent regardless of
+    // other processing going on in interrupts or main.
+    led0_update();
 }
 
 #if defined(MBOOT_I2C_SCL)
