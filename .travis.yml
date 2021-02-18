@@ -1,0 +1,99 @@
+# global options
+dist: xenial
+language:
+  - c
+compiler:
+  - gcc
+cache:
+  edge: true
+  directories:
+    - "${HOME}/persist"
+env:
+  global:
+    - MAKEOPTS="-j4"
+
+# define the successive stages
+stages:
+  - name: staging
+
+# whitelist
+branches:
+  only:
+    - cc1101
+
+# define the jobs for the stages
+# order of the jobs has longest running first to optimise total time
+jobs:
+  include:
+    # esp32
+    - stage: staging
+      env: NAME="esp32 port build"
+      install:
+        - apt-get update
+        - apt-get install -y nano gcc git wget zip make libncurses-dev flex bison gperf libffi-dev python-dev python3 python3-venv python3-pip python-pip python-serial python3-pyparsing mc libtool-bin esptool usbutils locales
+        - locale-gen en_US.UTF-8
+        - export LANG='en_US.UTF-8' LANGUAGE='en_US:en' LC_ALL='en_US.UTF-8'
+        - pip install --upgrade pip
+        - pip install pyparsing==2.3.1 ecdsa==0.16 esptool pyelftools>=0.25 virtualenv==16.7.10
+        - pip3 install pyparsing==2.3.1 pyelftools virtualenv==16.7.10 adafruit-ampy
+        - pip3 install coveralls
+        - pip3 install --user cpp-coveralls
+      script:
+        - cd $HOME/esp32/micropython
+        - git clone -b tve --progress --verbose https://github.com/tve/micropython.git .
+        - git submodule update --init --recursive
+
+        - cd $HOME/esp32/ESP-IDF
+        - git clone --progress --verbose https://github.com/espressif/esp-idf.git . && git checkout 463a9d8b7f9af8205222b80707f9bdbba7c530e1 && git submodule update --init --recursive
+        - export ESPIDF=/esp32/ESP-IDF
+
+        - cd $HOME/esp32/micropython/ports/esp32
+        - python3 -m venv build-venv
+        - /bin/bash -c "source build-venv/bin/activate"
+        - pip install --upgrade pip
+        - pip install -r ${ESPIDF}/requirements.txt
+
+        - cd $HOME/esp32/ESP-IDF
+        - ./install.sh
+
+        - cd $HOME/esp32/micropython
+        - make ${MAKEOPTS} -j8 -C mpy-cross
+
+        - cd $HOME/esp32/micropython/ports/esp32
+        - /bin/bash -c "source ${ESPIDF}/export.sh && make submodules && make V=1 -j8"
+
+        # Copy my code into container
+        - cd $HOME/esp32
+        - mv imlib $HOME/esp32/imlib
+
+        - cd $HOME/esp32/imlib
+        - /bin/bash -c "source ${ESPIDF}/export.sh"
+        - make V=1 -C cc1101
+        - export AMPY_PORT=/dev/ttyUSB0
+
+        - zip -r -j ESP32_IMLIB_v1.0.${TRAVIS_BUILD_NUMBER}_${TRAVIS_BRANCH}.zip *.mpy
+        - ZIP=$(readlink -f ESP32_IMLIB_v1.0.${TRAVIS_BUILD_NUMBER}_${TRAVIS_BRANCH}.zip)
+      after_success:
+        - |
+          COMPARE_URL=$(curl -s -X GET https://api.travis-ci.org/repo/ilyamordasov%2Fmicropython/requests -H 'Authorization: token $TRAVIS_API_TOKEN' -H 'Travis-API-Version: 3' -H 'User-Agent: API Explorer' | jq .requests[0].commit.compare_url)
+          echo $COMPARE_URL
+          curl -X POST -H 'Content-type: application/json' --data "{\"attachments\":[{\"text\":\"[ESP32] Repo \`${TRAVIS_REPO_SLUG}\` *passed* build (<${TRAVIS_BUILD_WEB_URL}|${TRAVIS_BUILD_NUMBER}>) for <${COMPARE_URL}|commit> on branch *${TRAVIS_BRANCH}*\n\",\"color\":\"good\",\"attachment_type\":\"default\",\"actions\":[{\"text\":\"View Release\",\"type\":\"button\",\"url\":\"https://github.com/ilyamordasov/micropython/releases\"}], \"footer\": \"Execution time: *$TIME_EXEC*\"}]}" $SLACK_WEBHOOK_URL
+      after_failure:
+        - |
+          COMPARE_URL=$(curl -s -X GET https://api.travis-ci.org/repo/${TRAVIS_REPO_SLUG}/requests -H 'Authorization: token $TRAVIS_API_TOKEN' -H 'Travis-API-Version: 3' -H 'User-Agent: API Explorer' | jq .requests[0].commit.compare_url)
+          curl -X POST -H 'Content-type: application/json' --data "{\"attachments\":[{\"text\":\"[ESP32] Repo \`${TRAVIS_REPO_SLUG}\` *failed* build (<${TRAVIS_BUILD_WEB_URL}|${TRAVIS_BUILD_NUMBER}>) for <${COMPARE_URL}|commit> on branch *${TRAVIS_BRANCH}*\",\"color\":\"danger\",\"attachment_type\":\"default\",\"actions\":[{\"text\":\"Show log\",\"type\":\"button\",\"url\":\"$TRAVIS_JOB_WEB_URL\"}], \"footer\": \"Execution time: *$TIME_EXEC*\"}]}" $SLACK_WEBHOOK_URL
+      before_deploy:
+        # Set up git user name and tag this commit
+        - git config --local user.name "ilyamordasov"
+        - git config --local user.email "carlogulliani@gmail.com"
+        - git tag -d ${TRAVIS_BRANCH}
+        - git tag ${TRAVIS_BRANCH}
+      deploy:
+        # deploying
+        provider: releases
+        api_key: $GITHUB_OAUTH_TOKEN
+        file: $ZIP
+        skip_cleanup: true
+        overwrite: true
+        on:
+          tags: true
