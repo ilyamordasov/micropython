@@ -6,6 +6,7 @@ import utime
 import urandom
 import ubinascii
 import math
+import esp32
 #import ccc1101 as cc1101
 
 class Defines(object):
@@ -109,6 +110,7 @@ class CC1101():
         self.gd0 = Pin(18, Pin.OUT) if gd0 == None else Pin(gd0, Pin.OUT)
         self.gd2 = Pin(19, Pin.OUT) if gd2 == None else Pin(gd2, Pin.OUT)
         self.cs = Pin(17, Pin.OUT, value=1) if cs == None else Pin(cs, Pin.OUT)
+        self.rmt = None
 
         self.pulse_t = 0
         self.pulse_w = 0
@@ -344,49 +346,33 @@ class CC1101():
     def getRSSI(self):
         return self.readSingleByte(Defines.RSSI)
 
-    def sendRawData(self, code1, code2, Pe):
-        code1 = (code1 << 16) + 257 * urandom.getrandbits(8)
-        print("0x%08X 0x%08X" % (code1, code2))
-        self.__sendANMotors(code1, code2, Pe)
-        #ToDo: если не установлен callback
-        self.txrx_cb(code1, code2) if self.txrx_cb is not None else None
-        utime.sleep_ms(1000)
-        return True
+    def sendRawData(self, code, low = 400, high = 800, repeat = 2):
+        #code1 = (code1 << 16) + 257 * urandom.getrandbits(8)
+        self.rmt = esp32.RMT(0, pin = self.gd0, clock_div = 8) if self.rmt is None else self.rmt
+        preamble = [650, 250]
+        if code is not None:
+            pulse_t = [low, high]
+            code_b = bin(code)
+            for _ in range(0, repeat):
+                for _ in range(12):
+                    self.rmt.write_pulses((preamble[0]*10, preamble[1]*10), start=1)
 
-    def __sendANMotors(self, c1, c2, Pe, repeat=2):
-        for j in range(0, repeat):
-            # отправляем 12 начальных импульсов 0-1
-            for i in range(0, 12):
-                utime.sleep_us(Pe)
-                self.gd0.on()
-                utime.sleep_us(Pe)
-                self.gd0.off()
-            utime.sleep_us(Pe * 10)
-            
-            #отправляем первую половину
-            for i in range(4 * 8, 0, -1):
-                self.__sendBit(c1 >> (i - 1) & 1, Pe)
-            
-            #вторую половину
-            for i in range(4 * 8, 0, -1):
-                self.__sendBit(c2 >> (i - 1) & 1, Pe)
-
-            #и еще пару ненужных бит, которые означают батарейку и флаг повтора
-            self.__sendBit(1, Pe)
-            self.__sendBit(1, Pe)
-            utime.sleep_us(Pe * 39)
-
-    def __sendBit(self, b, Pe):
-        if b == 0:
-            self.gd0.on() # 0
-            utime.sleep_us(Pe * 2)
-            self.gd0.off()
-            utime.sleep_us(Pe)
+                #utime.sleep_ms(2)
+                #for _ in range(64 - len(code_b[2:])): self.rmt.write_pulses((pulse_t[1]*10, pulse_t[0]*10), start=1)
+                code_arr = [0 for _ in range(64 - len(code_b[2:]))]
+                for x in code_b[2:]:
+                    code_arr.append(int(x))
+                code_arr.append(1)
+                code_arr.append(1)
+                for i in code_arr:
+                    pulse_t_tmp = pulse_t[::-1] if i is 0 else pulse_t
+                    self.rmt.write_pulses((pulse_t_tmp[0]*10, pulse_t_tmp[1]*10), start=1)
+                
+                utime.sleep_ms(17)
+            self.txrx_cb(code) if self.txrx_cb is not None else None
         else:
-            self.gd0.on() # 1
-            utime.sleep_us(Pe)
-            self.gd0.off()
-            utime.sleep_us(Pe * 2)
+            raise Exception("You must point the code")
+
 
     def sendPacketData(self, data):
         self.setRXState()
