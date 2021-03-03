@@ -134,7 +134,7 @@ class CC1101():
     
     def cc1101_cb(self, value):
         self.txrx_cb(value)
-
+    
     def readGDO2(self, pin = None):
         _pin = Pin(19 if pin is None else pin, Pin.IN)
         _pin.irq(self.dummy, Pin.IRQ_FALLING | Pin.IRQ_RISING)
@@ -362,8 +362,8 @@ class CC1101():
                 code_arr = [0 for _ in range(64 - len(code_b[2:]))]
                 for x in code_b[2:]:
                     code_arr.append(int(x))
-                code_arr.append(1)
-                code_arr.append(1)
+                # code_arr.append(1)
+                # code_arr.append(1)
                 for i in code_arr:
                     pulse_t_tmp = pulse_t[::-1] if i is 0 else pulse_t
                     self.rmt.write_pulses((pulse_t_tmp[0]*10, pulse_t_tmp[1]*10), start=1)
