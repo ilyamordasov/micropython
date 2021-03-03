@@ -22,11 +22,14 @@ class MAX6675():
 
         self.FIR = FIR(20)
 
+    def millis():
+        return int(round(utime.time() * 1000))
+
 
     def read(self):
         #check if new reading should be available
         #if True:
-        if utime.ticks_ms()-self.last_read_time > 220:
+        if millis()-self.last_read_time > 220:
 
             #/*
             #  Bring CS pin low to allow us to read the data from
@@ -70,7 +73,7 @@ class MAX6675():
 
             self.FIR.push(value)
             temp = (value * 0.25)
-            self.last_read_time = utime.ticks_ms()
+            self.last_read_time = millis()
             self.last_read_temp = temp
             self.last_error_tc = error_tc
 

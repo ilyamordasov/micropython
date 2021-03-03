@@ -27,12 +27,15 @@ class PID:
         self.output_fun = output_fun
         self.input_fun = input_fun
 
-        self.last_update_time = utime.ticks_ms()
+        self.last_update_time = millis()
+
+    def millis():
+        return int(round(utime.time() * 1000))
 
 
     def update(self):
 
-        if utime.ticks_ms() - self.last_update_time > 500:
+        if millis() - self.last_update_time > 500:
             """
             Calculate PID output value for given reference input and feedback
             """
@@ -45,13 +48,9 @@ class PID:
             self.D_value = self.Kd * ( current_value - self.prev_value )
 
 
-            lapsed_time = utime.ticks_ms() - self.last_update_time
+            lapsed_time = millis() - self.last_update_time
             lapsed_time /= 1000. #convert to seconds
-            self.last_update_time = utime.ticks_ms()
-
-
-
-
+            self.last_update_time = millis()
 
             self.I_value += self.error * self.Ki
 
@@ -75,4 +74,4 @@ class PID:
 
             self.output_fun(self.output / 100.0)
 
-            self.last_update_time = utime.ticks_ms()
+            self.last_update_time = millis()
